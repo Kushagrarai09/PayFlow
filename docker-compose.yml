@@ -1,0 +1,114 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payflow_local_only}
+      POSTGRES_DB: postgres
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  auth-service:
+    build: .
+    command: ["/app/service"]
+    environment:
+      SERVICE: auth
+      PORT: "8081"
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://${POSTGRES_USER:-payflow}:${POSTGRES_PASSWORD:-payflow_local_only}@postgres:5432/payflow_auth?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  account-service:
+    build: .
+    command: ["/app/service"]
+    environment:
+      SERVICE: account
+      PORT: "8082"
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://${POSTGRES_USER:-payflow}:${POSTGRES_PASSWORD:-payflow_local_only}@postgres:5432/payflow_accounts?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  ledger-service:
+    build: .
+    command: ["/app/service"]
+    environment:
+      SERVICE: ledger
+      PORT: "8083"
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://${POSTGRES_USER:-payflow}:${POSTGRES_PASSWORD:-payflow_local_only}@postgres:5432/payflow_ledger?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  transaction-service:
+    build: .
+    command: ["/app/service"]
+    environment:
+      SERVICE: transaction
+      PORT: "8084"
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://${POSTGRES_USER:-payflow}:${POSTGRES_PASSWORD:-payflow_local_only}@postgres:5432/payflow_transactions?sslmode=disable
+      ACCOUNT_URL: http://account-service:8082
+      LEDGER_URL: http://ledger-service:8083
+    depends_on:
+      postgres: {condition: service_healthy}
+      account-service: {condition: service_started}
+      ledger-service: {condition: service_started}
+
+  gateway:
+    build: .
+    command: ["/app/gateway"]
+    environment:
+      GATEWAY_PORT: "8080"
+      AUTH_URL: http://auth-service:8081
+      ACCOUNT_URL: http://account-service:8082
+      LEDGER_URL: http://ledger-service:8083
+      TRANSACTION_URL: http://transaction-service:8084
+    ports: ["8080:8080"]
+    depends_on: [auth-service, account-service, ledger-service, transaction-service]
+
+  web:
+    build: ./web
+    ports: ["5173:5173"]
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on: [gateway]
+
+volumes:
+  pgdata:
